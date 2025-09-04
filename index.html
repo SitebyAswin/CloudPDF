@@ -1,5 +1,5 @@
 <!-- GitHub Repo Description: CloudPDF — A web-based manga/PDF viewer with admin uploads, category organization, optional Telegram-backed storage, and server proxy endpoints.
-README (short): CloudPDF lets you host a static frontend on GitHub Pages and connect it to a Node/Express backend (Render/Vercel) that proxies PDF files from Telegram or stores them on disk/S3. See /api/list, /api/file/:id, /upload, /api/delete/:id for API. -->
+README (short): CloudPDF lets you host a static frontend on GitHub Pages and connect it to a Node/Express backend (Render/Vercel) that proxies PDF files from Telegram or stores them in S3 for shared access. See /api/list, /api/file/:id, /upload, /api/delete/:id. -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -8,11 +8,11 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
   <title>CloudPDF</title>
   <meta name="description" content="CloudPDF — web-based manga/PDF viewer with admin uploads, categories, server integration and Telegram storage support. Host the viewer on GitHub Pages and connect it to a Node/Express backend.">
 
-  <!-- PDF.js from CDN -->
+  <!-- PDF.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
 
   <style>
-    /* Theme variables for dark & light (use .light on <html> to switch) */
+    /* Theme vars */
     :root{
       --bg: #0f1724;
       --card: #0b1220;
@@ -36,7 +36,7 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
 
     *{box-sizing:border-box}
     body{margin:0;font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;color:var(--text); background:linear-gradient(180deg,var(--bg),#071029);min-height:100vh}
-    header{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid rgba(0,0,0,0.06);background:linear-gradient(180deg,transparent,rgba(0,0,0,0.02))}
+    header{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid rgba(0,0,0,0.06)}
     header h1{font-size:18px;margin:0}
     .wrap{display:flex;gap:18px;padding:18px}
     .sidebar{width:320px;min-height:70vh;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));border-radius:12px;padding:14px;backdrop-filter:blur(6px)}
@@ -54,12 +54,16 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
     .book-wrap{width:100%;max-width:980px;height:680px;display:flex;align-items:center;justify-content:center}
     .book{width:90%;height:100%;background:linear-gradient(180deg,#071026,#04101a);border-radius:12px;box-shadow:0 20px 60px rgba(2,6,23,0.7);position:relative;perspective:2200px;overflow:hidden}
 
+    /* Page slots */
     .page-slot{position:absolute;top:20px;bottom:20px;width:50%;overflow:hidden;background:var(--page-bg);border-radius:6px;box-shadow:inset 0 0 0 1px var(--page-border)}
     .page-slot.left{left:20px;transform-origin:right center}
     .page-slot.right{right:20px;transform-origin:left center}
-    canvas{width:100%;height:100%;display:block;background:transparent}
 
-    .flip-layer{position:absolute;top:20px;bottom:20px;left:calc(50% - 1px);width:50%;pointer-events:none;transform-style:preserve-3d}
+    /* Canvas style: we will set canvas.style.width/height in JS to match layout - do not force stretch with CSS */
+    canvas{display:block; background:transparent; image-rendering:optimizeQuality}
+
+    /* Flip layer */
+    .flip-layer{position:absolute;top:20px;bottom:20px;left:calc(50% - 1px);width:50%;pointer-events:none;transform-style:preserve-3d;z-index:60;will-change:transform}
     .flip-canvas{position:absolute;top:0;left:0;right:0;bottom:0;backface-visibility:hidden}
 
     .controls{display:flex;align-items:center;gap:8px;padding:8px 12px}
@@ -97,7 +101,7 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
           <button id="uploadBtn">Upload & Save</button>
           <button id="clearDB" class="ghost">Clear Local DB</button>
         </div>
-        <div class="note">Admin uploads will POST to <code>/upload</code> when SERVER_BASE is configured. Otherwise uploads are saved locally in IndexedDB.</div>
+        <div class="note">Admin uploads will POST to <code>/upload</code> when <code>SERVER_BASE</code> is configured. Otherwise uploads are saved locally in IndexedDB.</div>
       </div>
 
       <div style="margin-top:12px">
@@ -166,7 +170,6 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
       }
       localStorage.setItem(THEME_KEY, theme);
     }
-    // initial theme from localStorage or prefers-color-scheme
     (function initTheme(){
       const saved = localStorage.getItem(THEME_KEY);
       if(saved) return applyTheme(saved);
@@ -247,7 +250,6 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
       if(!res.ok) throw new Error('Failed to fetch list from server');
       return res.json();
     }
-    // fetch and return a Blob for a given id from server
     async function fetchBlobFromServer(id){
       const res = await fetch(api('/api/file/' + encodeURIComponent(id)));
       if(!res.ok) throw new Error('Failed to fetch file from server: ' + res.statusText);
@@ -290,23 +292,39 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
     let currentPage = 1;
     let pageCount = 0;
 
-    function sizeCanvasToSlot(canvas, slot){
-      const rect = slot.getBoundingClientRect();
-      canvas.width = Math.round(rect.width * devicePixelRatio);
-      canvas.height = Math.round(rect.height * devicePixelRatio);
-    }
-
+    /* ---------- Correct rendering: preserve aspect ratio and avoid stretch ----------
+       Approach:
+       - Get page native viewport at scale=1 to read intrinsic width/height.
+       - Compute a scale factor to fit into slotRect while maintaining aspect ratio.
+       - Use devicePixelRatio for backing store resolution.
+       - After rendering, set canvas.style.width/height to the CSS pixel size so it visually fits the slot.
+    ------------------------------------------------------------------------------*/
     async function renderPageTo(ctx, pageNum, canvas){
       const page = await currentDoc.getPage(pageNum);
-      const viewport = page.getViewport({scale:1});
-      const slotRect = canvas.getBoundingClientRect();
-      const scale = Math.min(slotRect.width/viewport.width, slotRect.height/viewport.height) * devicePixelRatio;
-      const vp = page.getViewport({scale});
+      const unscaledV = page.getViewport({scale:1}); // intrinsic size
+      const slotRect = canvas.parentElement.getBoundingClientRect(); // slot container (not canvas)
+      const maxW = slotRect.width;
+      const maxH = slotRect.height;
+
+      // choose scale to fit both width & height (no stretch)
+      const scaleForLayout = Math.min(maxW / unscaledV.width, maxH / unscaledV.height);
+      const deviceScale = window.devicePixelRatio || 1;
+      const finalScale = scaleForLayout * deviceScale;
+
+      const vp = page.getViewport({scale: finalScale});
+
+      // backing store size (device pixels)
       canvas.width = Math.round(vp.width);
       canvas.height = Math.round(vp.height);
-      ctx.setTransform(1,0,0,1,0,0);
-      ctx.clearRect(0,0,canvas.width,canvas.height);
-      await page.render({canvasContext:ctx,viewport:vp}).promise;
+
+      // CSS size (logical pixels) so canvas fits layout and keeps aspect ratio
+      canvas.style.width = (vp.width / deviceScale) + 'px';
+      canvas.style.height = (vp.height / deviceScale) + 'px';
+
+      // clear and render
+      ctx.setTransform(deviceScale, 0, 0, deviceScale, 0, 0); // scale drawing by devicePixelRatio
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      await page.render({canvasContext: ctx, viewport: vp}).promise;
     }
 
     async function showPages(){
@@ -317,11 +335,9 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
 
       const leftPageNum = Math.max(1,currentPage-1);
       const rightPageNum = currentPage;
-      sizeCanvasToSlot(leftCanvas, document.getElementById('leftSlot'));
-      sizeCanvasToSlot(rightCanvas, document.getElementById('rightSlot'));
 
-      try{ await renderPageTo(leftCtx,leftPageNum,leftCanvas); }catch(e){}
-      try{ await renderPageTo(rightCtx,rightPageNum,rightCanvas); }catch(e){ console.error(e); }
+      await renderPageTo(leftCtx,leftPageNum,leftCanvas);
+      await renderPageTo(rightCtx,rightPageNum,rightCanvas);
 
       titleDisplay.textContent = currentDoc.__pdfInfo?.title || (currentID ? (currentID) : 'Manga');
       infoDisplay.textContent = catFilter.value ? `Category: ${catFilter.value}` : '';
@@ -330,74 +346,107 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
       nextBtn.disabled = currentPage >= pageCount;
     }
 
+    // open remote/local
     async function openPDFRemote(id){
-      // fetch blob from server and open with pdf.js
       const blob = await fetchBlobFromServer(id);
       currentBlob = blob;
-      const arrayBuffer = await blob.arrayBuffer();
-      currentDoc = await pdfjsLib.getDocument({data:arrayBuffer}).promise;
+      const ab = await blob.arrayBuffer();
+      currentDoc = await pdfjsLib.getDocument({data:ab}).promise;
       currentDoc.__pdfInfo = { title: (await getServerTitle(id)) || id };
       currentID = id;
       currentPage = 1;
       await showPages();
     }
-
-    async function getServerTitle(id){
-      try{
-        const list = await fetchListFromServer();
-        const it = list.find(i => i.id == id);
-        return it?.title || it?.name || null;
-      }catch(e){
-        return null;
-      }
-    }
-
     async function openPDFlocal(id){
       const rec = await getPDFById(id);
       if(!rec) return alert('Not found locally');
       currentID = id;
       currentBlob = rec.blob;
-      const arrayBuffer = await rec.blob.arrayBuffer();
-      currentDoc = await pdfjsLib.getDocument({data:arrayBuffer}).promise;
+      const ab = await rec.blob.arrayBuffer();
+      currentDoc = await pdfjsLib.getDocument({data:ab}).promise;
       currentDoc.__pdfInfo = { title: rec.title || rec.name };
       currentPage = 1;
       await showPages();
     }
-
     async function openPDF(id, source){
       if(SERVER_BASE && source === 'server') return openPDFRemote(id);
       return openPDFlocal(id);
     }
 
-    // flip animation
+    /* ---------- Flip animation (fixed) ----------
+      - Draw target page onto flipCanvas using same size logic as renderPageTo.
+      - Fill flip canvas background white first (so the page looks natural).
+      - Position flipLayer above book and animate its CSS transform (rotateY).
+      - After animation completes, update currentPage and re-render left/right canvases.
+    ---------------------------------------------------------------------*/
     async function flip(direction){
       if(!currentDoc) return;
       let targetPage = direction === 'next' ? (currentPage + 1) : (currentPage - 1);
       if(targetPage < 1 || targetPage > pageCount) return;
 
+      // choose which slot and set flip origin
       if(direction === 'prev'){
+        // flipping from left to center (backwards)
         const leftSlot = document.getElementById('leftSlot');
-        sizeCanvasToSlot(flipCanvas,leftSlot);
-        await renderPageTo(flipCtx,targetPage,flipCanvas);
-        flipLayer.style.left = leftSlot.style.left || '20px';
-        flipLayer.style.right = '';
-        flipLayer.style.width = '50%';
+        // size flip canvas using left slot
+        const slotRect = leftSlot.getBoundingClientRect();
+        const deviceScale = window.devicePixelRatio || 1;
+
+        // compute intrinsic page size
+        const page = await currentDoc.getPage(targetPage);
+        const unscaledV = page.getViewport({scale:1});
+        const scaleForLayout = Math.min(slotRect.width / unscaledV.width, slotRect.height / unscaledV.height);
+        const finalScale = scaleForLayout * deviceScale;
+        const vp = page.getViewport({scale: finalScale});
+
+        flipCanvas.width = Math.round(vp.width);
+        flipCanvas.height = Math.round(vp.height);
+        flipCanvas.style.width = (vp.width / deviceScale) + 'px';
+        flipCanvas.style.height = (vp.height / deviceScale) + 'px';
+
+        // draw page to flip canvas
+        flipCtx.setTransform(deviceScale,0,0,deviceScale,0,0);
+        flipCtx.fillStyle = '#fff';
+        flipCtx.fillRect(0,0,flipCanvas.width,flipCanvas.height);
+        await page.render({canvasContext: flipCtx, viewport: vp}).promise;
+
+        // position flip layer over left slot
         flipLayer.style.display = 'block';
-        flipCanvas.style.transformOrigin = 'right center';
+        flipLayer.style.left = leftSlot.offsetLeft + 'px';
+        flipLayer.style.right = '';
+        flipLayer.style.width = (leftSlot.getBoundingClientRect().width) + 'px';
+        flipLayer.style.transformOrigin = 'right center';
         flipLayer.classList.remove('flipping');
         flipLayer.style.transform = 'rotateY(0deg)';
         await requestAnimationFramePromise();
         flipLayer.classList.add('flipping');
         flipLayer.style.transform = 'rotateY(180deg)';
       } else {
+        // next: flip right page forward
         const rightSlot = document.getElementById('rightSlot');
-        sizeCanvasToSlot(flipCanvas,rightSlot);
-        await renderPageTo(flipCtx,targetPage,flipCanvas);
-        flipLayer.style.left = '';
-        flipLayer.style.right = '20px';
-        flipLayer.style.width = '50%';
+        const slotRect = rightSlot.getBoundingClientRect();
+        const deviceScale = window.devicePixelRatio || 1;
+        const page = await currentDoc.getPage(targetPage);
+        const unscaledV = page.getViewport({scale:1});
+        const scaleForLayout = Math.min(slotRect.width / unscaledV.width, slotRect.height / unscaledV.height);
+        const finalScale = scaleForLayout * deviceScale;
+        const vp = page.getViewport({scale: finalScale});
+
+        flipCanvas.width = Math.round(vp.width);
+        flipCanvas.height = Math.round(vp.height);
+        flipCanvas.style.width = (vp.width / deviceScale) + 'px';
+        flipCanvas.style.height = (vp.height / deviceScale) + 'px';
+
+        flipCtx.setTransform(deviceScale,0,0,deviceScale,0,0);
+        flipCtx.fillStyle = '#fff';
+        flipCtx.fillRect(0,0,flipCanvas.width,flipCanvas.height);
+        await page.render({canvasContext: flipCtx, viewport: vp}).promise;
+
         flipLayer.style.display = 'block';
-        flipCanvas.style.transformOrigin = 'left center';
+        flipLayer.style.left = '';
+        flipLayer.style.right = (document.getElementById('book').clientWidth - rightSlot.offsetLeft - rightSlot.clientWidth) + 'px';
+        flipLayer.style.width = (rightSlot.getBoundingClientRect().width) + 'px';
+        flipLayer.style.transformOrigin = 'left center';
         flipLayer.classList.remove('flipping');
         flipLayer.style.transform = 'rotateY(0deg)';
         await requestAnimationFramePromise();
@@ -405,15 +454,14 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
         flipLayer.style.transform = 'rotateY(-180deg)';
       }
 
+      // wait for transition to finish
       await new Promise(r=>setTimeout(r,720));
       currentPage = targetPage;
       flipLayer.style.display = 'none';
       await showPages();
     }
 
-    function requestAnimationFramePromise(){
-      return new Promise(r=>requestAnimationFrame(()=>r()));
-    }
+    function requestAnimationFramePromise(){ return new Promise(r=>requestAnimationFrame(()=>r())); }
   </script>
   <script>
     // --- Populate list (server or local) ---
@@ -422,7 +470,7 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
       if(SERVER_BASE){
         try{
           all = await fetchListFromServer();
-          serverNote.textContent = `Server mode: ${SERVER_BASE} (listing ${all.length} items)`;
+          serverNote.textContent = `Server mode: ${SERVER_BASE} (listing ${all.length} items). Recommended server storage: S3 / object store for shared access.`;
         }catch(e){
           serverNote.textContent = `Server not reachable at ${SERVER_BASE} — falling back to local mode.`;
           console.error(e);
@@ -449,13 +497,11 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
         const id = b.dataset.id;
         if(!confirm('Delete this PDF?')) return;
         if(SERVER_BASE){
-          // ask server to delete if server supports it
           try{
             const res = await fetch(api('/api/delete/' + encodeURIComponent(id)), { method: 'DELETE' });
             if(res.ok){ await refreshList(); if(currentID===id){ clearViewer(); } return; }
           }catch(e){ console.warn('server delete failed', e); }
         }
-        // fallback: local delete
         await deleteById(id);
         await refreshList();
         if(currentID===id) clearViewer();
@@ -550,11 +596,9 @@ README (short): CloudPDF lets you host a static frontend on GitHub Pages and con
     // initial load
     (async ()=>{
       await refreshList();
-      // if server defined, try periodic refresh every 30s (optional)
       if(SERVER_BASE){
         setInterval(()=>refreshList().catch(()=>{}), 30000);
       }
-      // resize handling
       let resizeTimer;
       window.addEventListener('resize', ()=>{ clearTimeout(resizeTimer); resizeTimer = setTimeout(()=>{ if(currentDoc) showPages(); },220); });
     })();
