@@ -1,0 +1,563 @@
+<!-- GitHub Repo Description: CloudPDF — A web-based manga/PDF viewer with admin uploads, category organization, optional Telegram-backed storage, and server proxy endpoints.
+README (short): CloudPDF lets you host a static frontend on GitHub Pages and connect it to a Node/Express backend (Render/Vercel) that proxies PDF files from Telegram or stores them on disk/S3. See /api/list, /api/file/:id, /upload, /api/delete/:id for API. -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CloudPDF</title>
+  <meta name="description" content="CloudPDF — web-based manga/PDF viewer with admin uploads, categories, server integration and Telegram storage support. Host the viewer on GitHub Pages and connect it to a Node/Express backend.">
+
+  <!-- PDF.js from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+
+  <style>
+    /* Theme variables for dark & light (use .light on <html> to switch) */
+    :root{
+      --bg: #0f1724;
+      --card: #0b1220;
+      --accent: #f97316;
+      --muted: #9aa4b2;
+      --text: #e6eef6;
+      --page-bg: #ffffff;
+      --page-border: rgba(0,0,0,0.06);
+      color-scheme: dark;
+    }
+    .light {
+      --bg: #f7fafc;
+      --card: #ffffff;
+      --accent: #ff7a18;
+      --muted: #415160;
+      --text: #081426;
+      --page-bg: #ffffff;
+      --page-border: rgba(0,0,0,0.08);
+      color-scheme: light;
+    }
+
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;color:var(--text); background:linear-gradient(180deg,var(--bg),#071029);min-height:100vh}
+    header{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid rgba(0,0,0,0.06);background:linear-gradient(180deg,transparent,rgba(0,0,0,0.02))}
+    header h1{font-size:18px;margin:0}
+    .wrap{display:flex;gap:18px;padding:18px}
+    .sidebar{width:320px;min-height:70vh;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));border-radius:12px;padding:14px;backdrop-filter:blur(6px)}
+    .card{background:transparent;border-radius:10px;padding:10px}
+    label{font-size:13px;color:var(--muted);display:block;margin-bottom:6px}
+    input[type=text], select{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(0,0,0,0.06);background:rgba(255,255,255,0.02);color:inherit}
+    input[type=file]{color:inherit}
+    button{background:var(--accent);border:0;padding:8px 12px;border-radius:8px;color:#051018;cursor:pointer}
+    button.ghost{background:transparent;border:1px solid rgba(0,0,0,0.06);color:var(--muted)}
+    .list{margin-top:12px;max-height:56vh;overflow:auto}
+    .item{display:flex;align-items:center;justify-content:space-between;padding:8px;border-radius:8px;border:1px solid rgba(0,0,0,0.02);margin-bottom:8px;background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent)}
+    .meta{font-size:13px}
+
+    .viewer{flex:1;display:flex;flex-direction:column;gap:12px;align-items:center;}
+    .book-wrap{width:100%;max-width:980px;height:680px;display:flex;align-items:center;justify-content:center}
+    .book{width:90%;height:100%;background:linear-gradient(180deg,#071026,#04101a);border-radius:12px;box-shadow:0 20px 60px rgba(2,6,23,0.7);position:relative;perspective:2200px;overflow:hidden}
+
+    .page-slot{position:absolute;top:20px;bottom:20px;width:50%;overflow:hidden;background:var(--page-bg);border-radius:6px;box-shadow:inset 0 0 0 1px var(--page-border)}
+    .page-slot.left{left:20px;transform-origin:right center}
+    .page-slot.right{right:20px;transform-origin:left center}
+    canvas{width:100%;height:100%;display:block;background:transparent}
+
+    .flip-layer{position:absolute;top:20px;bottom:20px;left:calc(50% - 1px);width:50%;pointer-events:none;transform-style:preserve-3d}
+    .flip-canvas{position:absolute;top:0;left:0;right:0;bottom:0;backface-visibility:hidden}
+
+    .controls{display:flex;align-items:center;gap:8px;padding:8px 12px}
+    .pagenum{margin-left:8px;color:var(--muted)}
+
+    @media (max-width:900px){.wrap{flex-direction:column}.sidebar{width:auto}}
+    .flipping{transition:transform 700ms cubic-bezier(.2,.8,.2,1)}
+    .smallDel{background:transparent;border:1px solid rgba(0,0,0,0.04);padding:6px;border-radius:6px;color:var(--muted);cursor:pointer}
+    .openBtn{background:transparent;border:1px solid rgba(0,0,0,0.04);padding:6px;border-radius:6px;color:var(--muted);cursor:pointer}
+    .note{font-size:13px;color:var(--muted);margin-top:8px}
+    .header-actions{display:flex;gap:8px;align-items:center}
+    .icon-btn{background:transparent;border:1px solid rgba(0,0,0,0.06);padding:6px 8px;border-radius:8px;cursor:pointer;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📚 CloudPDF</h1>
+    <div class="header-actions">
+      <button id="themeToggle" class="icon-btn" title="Toggle light/dark">🌙</button>
+      <button id="adminToggle" class="ghost">Admin</button>
+      <button id="downloadBtn" class="ghost" title="Download current PDF">Download PDF</button>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <aside class="sidebar card">
+      <div id="adminPanel" style="display:none">
+        <label>Upload PDF (manga)</label>
+        <input id="pdfFile" type="file" accept="application/pdf">
+        <label style="margin-top:8px">Category</label>
+        <input id="categoryInput" type="text" placeholder="e.g. Naruto, OnePiece...">
+        <label style="margin-top:8px">Title</label>
+        <input id="titleInput" type="text" placeholder="Volume / Chapter name">
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button id="uploadBtn">Upload & Save</button>
+          <button id="clearDB" class="ghost">Clear Local DB</button>
+        </div>
+        <div class="note">Admin uploads will POST to <code>/upload</code> when SERVER_BASE is configured. Otherwise uploads are saved locally in IndexedDB.</div>
+      </div>
+
+      <div style="margin-top:12px">
+        <label>Filter by Category</label>
+        <select id="catFilter"><option value="">— All categories —</option></select>
+      </div>
+      <div class="list" id="pdfList">
+        <!-- items go here -->
+      </div>
+      <div class="note" id="serverNote"></div>
+    </aside>
+
+    <main class="viewer">
+      <div style="display:flex;align-items:center;gap:12px;width:100%;max-width:980px;justify-content:space-between;padding:6px 8px">
+        <div>
+          <strong id="titleDisplay">No book loaded</strong>
+          <span class="pagenum" id="infoDisplay"></span>
+        </div>
+        <div class="controls">
+          <button id="prevBtn">◀ Prev</button>
+          <button id="nextBtn">Next ▶</button>
+          <span class="pagenum">Page <span id="pageNum">0</span> / <span id="pageCount">0</span></span>
+        </div>
+      </div>
+
+      <div class="book-wrap">
+        <div class="book" id="book">
+          <div class="page-slot left" id="leftSlot"><canvas id="leftCanvas"></canvas></div>
+          <div class="page-slot right" id="rightSlot"><canvas id="rightCanvas"></canvas></div>
+          <div class="flip-layer" id="flipLayer" style="display:none">
+            <canvas id="flipCanvas" class="flip-canvas" style="width:100%;height:100%"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:100%;max-width:980px;display:flex;justify-content:space-between;align-items:center">
+        <div style="color:var(--muted);font-size:13px">Tip: Use ← and → keyboard keys to turn pages. Admin mode to upload PDFs.</div>
+        <div>
+          <button id="deleteBtn" class="ghost">Delete</button>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script>
+    // --- SERVER CONFIG ---
+    // If your server is hosted at https://my-server.example.com, set it here.
+    // Example: const SERVER_BASE = 'https://my-server.example.com';
+    // Leave empty '' to use local IndexedDB-only mode.
+    const SERVER_BASE = ''; // <-- EDIT THIS for production (no trailing slash)
+
+    // PDF.js worker (CDN)
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+    // --- Theme (light/dark) ---
+    const THEME_KEY = 'cloudpdf_theme';
+    const themeToggle = document.getElementById('themeToggle');
+    function applyTheme(theme){
+      if(theme === 'light'){
+        document.documentElement.classList.add('light');
+        themeToggle.textContent = '☀️';
+        themeToggle.title = 'Switch to dark';
+      } else {
+        document.documentElement.classList.remove('light');
+        themeToggle.textContent = '🌙';
+        themeToggle.title = 'Switch to light';
+      }
+      localStorage.setItem(THEME_KEY, theme);
+    }
+    // initial theme from localStorage or prefers-color-scheme
+    (function initTheme(){
+      const saved = localStorage.getItem(THEME_KEY);
+      if(saved) return applyTheme(saved);
+      const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+      applyTheme(prefersLight ? 'light' : 'dark');
+    })();
+    themeToggle.addEventListener('click', ()=>{
+      const now = document.documentElement.classList.contains('light') ? 'dark' : 'light';
+      applyTheme(now);
+    });
+
+    // --- IndexedDB helpers (fallback local storage) ---
+    const DB_NAME = 'mangaDB_v1';
+    const STORE = 'pdfs';
+    function openDB(){
+      return new Promise((resolve, reject)=>{
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = e => {
+          const db = e.target.result;
+          if(!db.objectStoreNames.contains(STORE)){
+            const os = db.createObjectStore(STORE, { keyPath: 'id' });
+            os.createIndex('byCategory','category',{unique:false});
+          }
+        }
+        req.onsuccess = e => resolve(e.target.result);
+        req.onerror = e => reject(e.target.error);
+      });
+    }
+    async function putPDF(record){
+      const db = await openDB();
+      return new Promise((res,rej)=>{
+        const tx = db.transaction(STORE,'readwrite');
+        tx.objectStore(STORE).put(record);
+        tx.oncomplete = ()=>res(true);
+        tx.onerror = e=>rej(e.target.error);
+      })
+    }
+    async function getAllPDFs(){
+      const db = await openDB();
+      return new Promise((res,rej)=>{
+        const tx = db.transaction(STORE,'readonly');
+        const req = tx.objectStore(STORE).getAll();
+        req.onsuccess = ()=>res(req.result);
+        req.onerror = e=>rej(e.target.error);
+      })
+    }
+    async function getPDFById(id){
+      const db = await openDB();
+      return new Promise((res,rej)=>{
+        const req = db.transaction(STORE).objectStore(STORE).get(id);
+        req.onsuccess = ()=>res(req.result);
+        req.onerror = e=>rej(e.target.error);
+      })
+    }
+    async function deleteById(id){
+      const db = await openDB();
+      return new Promise((res,rej)=>{
+        const tx = db.transaction(STORE,'readwrite');
+        tx.objectStore(STORE).delete(id);
+        tx.oncomplete = ()=>res(true);
+        tx.onerror = e=>rej(e.target.error);
+      })
+    }
+    async function clearDB(){
+      const db = await openDB();
+      return new Promise((res,rej)=>{
+        const tx = db.transaction(STORE,'readwrite');
+        tx.objectStore(STORE).clear();
+        tx.oncomplete = ()=>res(true);
+        tx.onerror = e=>rej(e.target.error);
+      })
+    }
+
+    // --- Server helpers ---
+    function api(path){ return (SERVER_BASE || '') + path; }
+    async function fetchListFromServer(){
+      const res = await fetch(api('/api/list'));
+      if(!res.ok) throw new Error('Failed to fetch list from server');
+      return res.json();
+    }
+    // fetch and return a Blob for a given id from server
+    async function fetchBlobFromServer(id){
+      const res = await fetch(api('/api/file/' + encodeURIComponent(id)));
+      if(!res.ok) throw new Error('Failed to fetch file from server: ' + res.statusText);
+      return await res.blob();
+    }
+  </script>
+  <script>
+    // UI refs
+    const adminToggle = document.getElementById('adminToggle');
+    const adminPanel = document.getElementById('adminPanel');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const pdfFile = document.getElementById('pdfFile');
+    const categoryInput = document.getElementById('categoryInput');
+    const titleInput = document.getElementById('titleInput');
+    const pdfList = document.getElementById('pdfList');
+    const catFilter = document.getElementById('catFilter');
+    const titleDisplay = document.getElementById('titleDisplay');
+    const infoDisplay = document.getElementById('infoDisplay');
+    const pageNumEl = document.getElementById('pageNum');
+    const pageCountEl = document.getElementById('pageCount');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    const deleteBtn = document.getElementById('deleteBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const serverNote = document.getElementById('serverNote');
+
+    // canvases
+    const leftCanvas = document.getElementById('leftCanvas');
+    const rightCanvas = document.getElementById('rightCanvas');
+    const flipCanvas = document.getElementById('flipCanvas');
+    const flipLayer = document.getElementById('flipLayer');
+    const leftCtx = leftCanvas.getContext('2d');
+    const rightCtx = rightCanvas.getContext('2d');
+    const flipCtx = flipCanvas.getContext('2d');
+
+    // state
+    let currentDoc = null;
+    let currentBlob = null;
+    let currentID = null;
+    let currentPage = 1;
+    let pageCount = 0;
+
+    function sizeCanvasToSlot(canvas, slot){
+      const rect = slot.getBoundingClientRect();
+      canvas.width = Math.round(rect.width * devicePixelRatio);
+      canvas.height = Math.round(rect.height * devicePixelRatio);
+    }
+
+    async function renderPageTo(ctx, pageNum, canvas){
+      const page = await currentDoc.getPage(pageNum);
+      const viewport = page.getViewport({scale:1});
+      const slotRect = canvas.getBoundingClientRect();
+      const scale = Math.min(slotRect.width/viewport.width, slotRect.height/viewport.height) * devicePixelRatio;
+      const vp = page.getViewport({scale});
+      canvas.width = Math.round(vp.width);
+      canvas.height = Math.round(vp.height);
+      ctx.setTransform(1,0,0,1,0,0);
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      await page.render({canvasContext:ctx,viewport:vp}).promise;
+    }
+
+    async function showPages(){
+      if(!currentDoc) return;
+      pageCount = currentDoc.numPages;
+      pageCountEl.textContent = pageCount;
+      pageNumEl.textContent = currentPage;
+
+      const leftPageNum = Math.max(1,currentPage-1);
+      const rightPageNum = currentPage;
+      sizeCanvasToSlot(leftCanvas, document.getElementById('leftSlot'));
+      sizeCanvasToSlot(rightCanvas, document.getElementById('rightSlot'));
+
+      try{ await renderPageTo(leftCtx,leftPageNum,leftCanvas); }catch(e){}
+      try{ await renderPageTo(rightCtx,rightPageNum,rightCanvas); }catch(e){ console.error(e); }
+
+      titleDisplay.textContent = currentDoc.__pdfInfo?.title || (currentID ? (currentID) : 'Manga');
+      infoDisplay.textContent = catFilter.value ? `Category: ${catFilter.value}` : '';
+
+      prevBtn.disabled = currentPage <= 1;
+      nextBtn.disabled = currentPage >= pageCount;
+    }
+
+    async function openPDFRemote(id){
+      // fetch blob from server and open with pdf.js
+      const blob = await fetchBlobFromServer(id);
+      currentBlob = blob;
+      const arrayBuffer = await blob.arrayBuffer();
+      currentDoc = await pdfjsLib.getDocument({data:arrayBuffer}).promise;
+      currentDoc.__pdfInfo = { title: (await getServerTitle(id)) || id };
+      currentID = id;
+      currentPage = 1;
+      await showPages();
+    }
+
+    async function getServerTitle(id){
+      try{
+        const list = await fetchListFromServer();
+        const it = list.find(i => i.id == id);
+        return it?.title || it?.name || null;
+      }catch(e){
+        return null;
+      }
+    }
+
+    async function openPDFlocal(id){
+      const rec = await getPDFById(id);
+      if(!rec) return alert('Not found locally');
+      currentID = id;
+      currentBlob = rec.blob;
+      const arrayBuffer = await rec.blob.arrayBuffer();
+      currentDoc = await pdfjsLib.getDocument({data:arrayBuffer}).promise;
+      currentDoc.__pdfInfo = { title: rec.title || rec.name };
+      currentPage = 1;
+      await showPages();
+    }
+
+    async function openPDF(id, source){
+      if(SERVER_BASE && source === 'server') return openPDFRemote(id);
+      return openPDFlocal(id);
+    }
+
+    // flip animation
+    async function flip(direction){
+      if(!currentDoc) return;
+      let targetPage = direction === 'next' ? (currentPage + 1) : (currentPage - 1);
+      if(targetPage < 1 || targetPage > pageCount) return;
+
+      if(direction === 'prev'){
+        const leftSlot = document.getElementById('leftSlot');
+        sizeCanvasToSlot(flipCanvas,leftSlot);
+        await renderPageTo(flipCtx,targetPage,flipCanvas);
+        flipLayer.style.left = leftSlot.style.left || '20px';
+        flipLayer.style.right = '';
+        flipLayer.style.width = '50%';
+        flipLayer.style.display = 'block';
+        flipCanvas.style.transformOrigin = 'right center';
+        flipLayer.classList.remove('flipping');
+        flipLayer.style.transform = 'rotateY(0deg)';
+        await requestAnimationFramePromise();
+        flipLayer.classList.add('flipping');
+        flipLayer.style.transform = 'rotateY(180deg)';
+      } else {
+        const rightSlot = document.getElementById('rightSlot');
+        sizeCanvasToSlot(flipCanvas,rightSlot);
+        await renderPageTo(flipCtx,targetPage,flipCanvas);
+        flipLayer.style.left = '';
+        flipLayer.style.right = '20px';
+        flipLayer.style.width = '50%';
+        flipLayer.style.display = 'block';
+        flipCanvas.style.transformOrigin = 'left center';
+        flipLayer.classList.remove('flipping');
+        flipLayer.style.transform = 'rotateY(0deg)';
+        await requestAnimationFramePromise();
+        flipLayer.classList.add('flipping');
+        flipLayer.style.transform = 'rotateY(-180deg)';
+      }
+
+      await new Promise(r=>setTimeout(r,720));
+      currentPage = targetPage;
+      flipLayer.style.display = 'none';
+      await showPages();
+    }
+
+    function requestAnimationFramePromise(){
+      return new Promise(r=>requestAnimationFrame(()=>r()));
+    }
+  </script>
+  <script>
+    // --- Populate list (server or local) ---
+    async function refreshList(){
+      let all = [];
+      if(SERVER_BASE){
+        try{
+          all = await fetchListFromServer();
+          serverNote.textContent = `Server mode: ${SERVER_BASE} (listing ${all.length} items)`;
+        }catch(e){
+          serverNote.textContent = `Server not reachable at ${SERVER_BASE} — falling back to local mode.`;
+          console.error(e);
+          all = await getAllPDFs();
+        }
+      } else {
+        serverNote.textContent = 'Local-only mode (no SERVER_BASE configured)';
+        all = await getAllPDFs();
+      }
+
+      const cats = [...new Set(all.map(a=>a.category || 'Uncategorized'))];
+      catFilter.innerHTML = '<option value="">— All categories —</option>' + cats.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+      const filterVal = catFilter.value;
+      const filtered = filterVal ? all.filter(a=>a.category===filterVal) : all;
+
+      pdfList.innerHTML = filtered.map(r=>`<div class="item"><div class="meta"><strong>${escapeHtml(r.title||r.name)}</strong><div style="font-size:12px;color:var(--muted)">${escapeHtml(r.category||'Uncategorized')} • ${new Date(r.date||Date.now()).toLocaleString()}</div></div><div style="display:flex;flex-direction:column;gap:6px"><button data-id="${r.id}" data-source="${r.source|| (SERVER_BASE ? 'server' : 'local')}" class="openBtn">Open</button><button data-id="${r.id}" class="smallDel">Delete</button></div></div>`).join('') || '<div style="color:var(--muted)">No PDFs</div>';
+
+      document.querySelectorAll('.openBtn').forEach(b=>b.addEventListener('click', async e=>{
+        const id = b.dataset.id;
+        const source = b.dataset.source === 'server' ? 'server' : 'local';
+        try{ await openPDF(id, source); }catch(err){ alert('Open failed: ' + err.message); console.error(err); }
+      }));
+      document.querySelectorAll('.smallDel').forEach(b=>b.addEventListener('click', async e=>{
+        const id = b.dataset.id;
+        if(!confirm('Delete this PDF?')) return;
+        if(SERVER_BASE){
+          // ask server to delete if server supports it
+          try{
+            const res = await fetch(api('/api/delete/' + encodeURIComponent(id)), { method: 'DELETE' });
+            if(res.ok){ await refreshList(); if(currentID===id){ clearViewer(); } return; }
+          }catch(e){ console.warn('server delete failed', e); }
+        }
+        // fallback: local delete
+        await deleteById(id);
+        await refreshList();
+        if(currentID===id) clearViewer();
+      }));
+    }
+
+    function clearViewer(){
+      currentDoc = null; currentBlob = null; currentID = null;
+      titleDisplay.textContent = 'No book loaded';
+      leftCtx.clearRect(0,0,leftCanvas.width,leftCanvas.height);
+      rightCtx.clearRect(0,0,rightCanvas.width,rightCanvas.height);
+      pageNumEl.textContent = '0'; pageCountEl.textContent = '0';
+    }
+
+    // Upload handler: server POST /upload or local IndexedDB
+    uploadBtn.addEventListener('click', async ()=>{
+      const f = pdfFile.files[0];
+      if(!f) return alert('Select a PDF file first');
+      const cat = categoryInput.value.trim() || 'Uncategorized';
+      const title = titleInput.value.trim() || f.name;
+      if(SERVER_BASE){
+        // POST to server
+        try{
+          const fd = new FormData();
+          fd.append('file', f);
+          fd.append('title', title);
+          fd.append('category', cat);
+          const res = await fetch(api('/upload'), { method: 'POST', body: fd });
+          if(!res.ok) throw new Error('Upload failed: ' + res.statusText);
+          alert('Uploaded to server');
+          pdfFile.value='';categoryInput.value='';titleInput.value='';
+          await refreshList();
+          return;
+        }catch(e){
+          alert('Server upload failed, saved locally instead. ' + e.message);
+          console.warn(e);
+        }
+      }
+      // local fallback
+      const id = crypto.randomUUID();
+      const blob = f.slice(0,f.size,f.type);
+      const rec = { id, name: f.name, title, category: cat, date: Date.now(), blob, source: 'local' };
+      await putPDF(rec);
+      alert('Saved locally');
+      pdfFile.value='';categoryInput.value='';titleInput.value='';
+      await refreshList();
+    });
+
+    document.getElementById('clearDB').addEventListener('click', async ()=>{
+      if(confirm('Clear entire local DB? This cannot be undone.')){ await clearDB(); await refreshList(); }
+    });
+
+    // Delete loaded file
+    deleteBtn.addEventListener('click', async ()=>{
+      if(!currentID) return alert('No PDF selected');
+      if(confirm('Delete the loaded PDF?')){
+        if(SERVER_BASE){
+          try{
+            const res = await fetch(api('/api/delete/' + encodeURIComponent(currentID)), { method: 'DELETE' });
+            if(res.ok){ clearViewer(); await refreshList(); return; }
+          }catch(e){ console.warn('server delete failed', e); }
+        }
+        await deleteById(currentID);
+        clearViewer();
+        await refreshList();
+      }
+    });
+
+    downloadBtn.addEventListener('click', async ()=>{
+      if(!currentBlob) return alert('No PDF loaded');
+      const url = URL.createObjectURL(currentBlob);
+      const a = document.createElement('a'); a.href = url; a.download = (currentDoc?.__pdfInfo?.title||'manga') + '.pdf';
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    });
+
+    adminToggle.addEventListener('click', ()=>{
+      const pass = prompt('Enter admin password: (default is admin123)');
+      if(pass === 'admin123'){
+        adminPanel.style.display = adminPanel.style.display === 'none' ? 'block' : 'none';
+      }else{
+        alert('Wrong password');
+      }
+    });
+
+    catFilter.addEventListener('change', refreshList);
+    nextBtn.addEventListener('click', ()=>flip('next'));
+    prevBtn.addEventListener('click', ()=>flip('prev'));
+    window.addEventListener('keydown', e=>{ if(e.key === 'ArrowRight') nextBtn.click(); if(e.key === 'ArrowLeft') prevBtn.click(); });
+
+    function escapeHtml(s){return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');}
+
+    // initial load
+    (async ()=>{
+      await refreshList();
+      // if server defined, try periodic refresh every 30s (optional)
+      if(SERVER_BASE){
+        setInterval(()=>refreshList().catch(()=>{}), 30000);
+      }
+      // resize handling
+      let resizeTimer;
+      window.addEventListener('resize', ()=>{ clearTimeout(resizeTimer); resizeTimer = setTimeout(()=>{ if(currentDoc) showPages(); },220); });
+    })();
+  </script>
+</body>
+</html>
